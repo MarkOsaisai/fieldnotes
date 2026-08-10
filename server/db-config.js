@@ -1,58 +1,53 @@
 // server/db-config.js
-// Database configuration and abstraction layer
-// Supports both SQLite (local development) and PostgreSQL (production on Vercel)
+// Supports SQLite (local dev) and PostgreSQL (production via DATABASE_URL)
 
 const path = require('path');
 const fs = require('fs');
 
 const DB_TYPE = process.env.DATABASE_URL ? 'postgres' : 'sqlite';
 
+// Convert ? placeholders to $1, $2, ... for PostgreSQL
+function toPostgresParams(sql) {
+  let i = 0;
+  return sql.replace(/\?/g, () => `$${++i}`);
+}
+
 let db;
 
 if (DB_TYPE === 'postgres') {
-  // PostgreSQL configuration for production
   const pg = require('pg');
-  const connectionString = process.env.DATABASE_URL;
-  
-  if (!connectionString) {
-    throw new Error('DATABASE_URL environment variable is required for PostgreSQL');
-  }
 
   const pool = new pg.Pool({
-    connectionString,
+    connectionString: process.env.DATABASE_URL,
     ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
   });
 
   db = {
     type: 'postgres',
     pool,
+    // SQL fragment for time comparisons (dialect difference)
+    daysAgo: (n) => `NOW() - INTERVAL '${n} days'`,
     query: async (sql, params = []) => {
-      try {
-        const result = await pool.query(sql, params);
-        return result.rows;
-      } catch (err) {
-        console.error('DB Query Error:', sql, params);
-        throw err;
-      }
+      const result = await pool.query(toPostgresParams(sql), params);
+      return result.rows;
     },
     queryOne: async (sql, params = []) => {
-      const results = await db.query(sql, params);
-      return results[0] || null;
+      const result = await pool.query(toPostgresParams(sql), params);
+      return result.rows[0] || null;
+    },
+    // For UPDATE / DELETE statements
+    run: async (sql, params = []) => {
+      const result = await pool.query(toPostgresParams(sql), params);
+      return { changes: result.rowCount };
     },
     exec: async (sql) => {
-      // For multi-statement SQL, split and execute
-      const statements = sql.split(';').filter(s => s.trim());
-      for (const statement of statements) {
-        if (statement.trim()) {
-          await pool.query(statement);
-        }
-      }
+      const stmts = sql.split(';').filter(s => s.trim());
+      for (const stmt of stmts) await pool.query(stmt);
     },
   };
 
   console.log('Using PostgreSQL database');
 } else {
-  // SQLite configuration for local development
   const { DatabaseSync } = require('node:sqlite');
 
   const DATA_DIR = path.join(__dirname, 'data');
@@ -61,35 +56,18 @@ if (DB_TYPE === 'postgres') {
   const DB_PATH = process.env.FIELDNOTES_DB_PATH || path.join(DATA_DIR, 'fieldnotes.db');
   const sqlite = new DatabaseSync(DB_PATH);
 
-  sqlite.exec('PRAGMA foreign_keys = ON;');
-
   db = {
     type: 'sqlite',
     connection: sqlite,
-    query: (sql, params = []) => {
-      try {
-        const stmt = sqlite.prepare(sql);
-        return stmt.all(...params);
-      } catch (err) {
-        console.error('DB Query Error:', sql, params);
-        throw err;
-      }
-    },
-    queryOne: (sql, params = []) => {
-      try {
-        const stmt = sqlite.prepare(sql);
-        return stmt.get(...params) || null;
-      } catch (err) {
-        console.error('DB Query Error:', sql, params);
-        throw err;
-      }
-    },
-    exec: (sql) => {
-      sqlite.exec(sql);
-    },
+    daysAgo: (n) => `datetime('now', '-${n} days')`,
+    query: (sql, params = []) => sqlite.prepare(sql).all(...params),
+    queryOne: (sql, params = []) => sqlite.prepare(sql).get(...params) || null,
+    run: (sql, params = []) => sqlite.prepare(sql).run(...params),
+    exec: (sql) => sqlite.exec(sql),
   };
 
   console.log('Using SQLite database at', DB_PATH);
 }
 
 module.exports = db;
+
