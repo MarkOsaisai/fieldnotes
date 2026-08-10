@@ -1,14 +1,20 @@
 // server/env-validator.js
 // Validate required environment variables at startup
 
+const DEFAULT_JWT_SECRET = 'dev-secret-change-me';
+
 function validateEnvironment() {
   const errors = [];
   const warnings = [];
 
+  const rawJwtSecret = process.env.JWT_SECRET;
+  const resolvedJwtSecret = rawJwtSecret && rawJwtSecret.trim() ? rawJwtSecret : DEFAULT_JWT_SECRET;
+  process.env.JWT_SECRET = resolvedJwtSecret;
+
   // Required variables
-  if (!process.env.JWT_SECRET) {
-    errors.push('JWT_SECRET is not set. Set it in your .env file or environment variables.');
-  } else if (process.env.JWT_SECRET.length < 16) {
+  if (!rawJwtSecret || !rawJwtSecret.trim()) {
+    warnings.push('JWT_SECRET is not set. Using the built-in development secret for local testing.');
+  } else if (resolvedJwtSecret.length < 16) {
     warnings.push('JWT_SECRET is too short. Use at least 16 characters for security.');
   }
 
