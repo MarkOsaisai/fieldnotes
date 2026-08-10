@@ -1,0 +1,402 @@
+// server/routes/posts.js
+// Phase 2.2: Post & Engagement Logic, Phase 2.3: The "Popular" Filter
+// + Category support: posts can be filtered by categoryId
+
+const express = require('express');
+const path = require('path');
+const fs = require('fs');
+const multer = require('multer');
+const db = require('../db');
+const { requireAuth, optionalAuth } = require('../middleware/auth');
+
+const router = express.Router();
+
+const UPLOAD_DIR = path.join(__dirname, '..', 'uploads');
+if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, UPLOAD_DIR),
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    cb(null, `post-${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`);
+  },
+});
+
+const ALLOWED_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'video/mp4', 'video/webm', 'video/quicktime']);
+const upload = multer({
+  storage,
+  limits: { fileSize: 20 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (!ALLOWED_TYPES.has(file.mimetype)) return cb(new Error('Only images and common video formats are allowed.'));
+    cb(null, true);
+  },
+});
+
+const POST_FIELDS = `
+  posts.id, posts.title, posts.content, posts.createdAt, posts.categoryId,
+  posts.mediaType, posts.mediaUrl,
+  users.id AS authorId, users.username AS authorUsername,
+  categories.title AS categoryTitle,
+  (SELECT COUNT(*) FROM likes WHERE likes.postId = posts.id) AS likeCount,
+  (SELECT COUNT(*) FROM comments WHERE comments.postId = posts.id) AS commentCount
+`;
+
+function attachViewerLiked(rows, viewerId) {
+  if (!viewerId || rows.length === 0) {
+    return rows.map((r) => ({ ...r, likedByMe: false }));
+  }
+  const placeholders = rows.map(() => '?').join(',');
+  const likedIds = new Set(
+    db
+      .prepare(`SELECT postId FROM likes WHERE userId = ? AND postId IN (${placeholders})`)
+      .all(viewerId, ...rows.map((r) => r.id))
+      .map((r) => r.postId)
+  );
+  return rows.map((r) => ({ ...r, likedByMe: likedIds.has(r.id) }));
+}
+
+function isAuthorOrAdmin(postAuthorId, user) {
+  return Boolean(user && (user.role === 'admin' || user.id === postAuthorId));
+}
+
+function removeMediaFile(mediaUrl) {
+  if (!mediaUrl) return;
+  const relativePath = mediaUrl.replace(/^\/uploads\//, '');
+  const absolutePath = path.join(UPLOAD_DIR, relativePath);
+  fs.unlink(absolutePath, () => {});
+}
+
+// GET /api/posts?filter=recent|popular&sort=newest|oldest|popular&categoryId=...&page=1&limit=8
+router.get('/', optionalAuth, (req, res) => {
+  const filter = req.query.filter === 'popular' ? 'popular' : 'recent';
+  const sort = req.query.sort === 'oldest' ? 'oldest' : req.query.sort === 'popular' ? 'popular' : 'newest';
+  const categoryId = req.query.categoryId ? parseInt(req.query.categoryId, 10) : null;
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const limit = Math.min(20, Math.max(1, parseInt(req.query.limit, 10) || 8));
+  const offset = (page - 1) * limit;
+
+  const categoryClause = categoryId && !isNaN(categoryId) ? 'WHERE posts.categoryId = ?' : '';
+  const categoryParam = categoryId && !isNaN(categoryId) ? [categoryId] : [];
+
+  let rows;
+  if (filter === 'popular' || sort === 'popular') {
+    rows = db
+      .prepare(
+        `
+        SELECT ${POST_FIELDS},
+          (SELECT COUNT(*) FROM likes WHERE likes.postId = posts.id
+             AND likes.createdAt >= datetime('now', '-7 days')) AS recentLikeCount
+        FROM posts
+        JOIN users ON users.id = posts.authorId
+        LEFT JOIN categories ON categories.id = posts.categoryId
+        ${categoryClause}
+        ORDER BY recentLikeCount DESC, likeCount DESC, posts.createdAt DESC
+        LIMIT ${limit} OFFSET ${offset}
+        `
+      )
+      .all(...categoryParam);
+  } else if (sort === 'oldest') {
+    rows = db
+      .prepare(
+        `
+        SELECT ${POST_FIELDS}
+        FROM posts
+        JOIN users ON users.id = posts.authorId
+        LEFT JOIN categories ON categories.id = posts.categoryId
+        ${categoryClause}
+        ORDER BY posts.createdAt ASC
+        LIMIT ${limit} OFFSET ${offset}
+        `
+      )
+      .all(...categoryParam);
+  } else {
+    rows = db
+      .prepare(
+        `
+        SELECT ${POST_FIELDS}
+        FROM posts
+        JOIN users ON users.id = posts.authorId
+        LEFT JOIN categories ON categories.id = posts.categoryId
+        ${categoryClause}
+        ORDER BY posts.createdAt DESC
+        LIMIT ${limit} OFFSET ${offset}
+        `
+      )
+      .all(...categoryParam);
+  }
+
+  const totalCount = db
+    .prepare(`SELECT COUNT(*) AS n FROM posts ${categoryClause}`)
+    .get(...categoryParam).n;
+
+  res.json({
+    posts: attachViewerLiked(rows, req.user?.id),
+    hasMore: offset + rows.length < totalCount,
+  });
+});
+
+// GET /api/posts/participants — top contributors by post count
+router.get('/participants', optionalAuth, (req, res) => {
+  const rows = db
+    .prepare(`
+      SELECT users.id, users.username, COUNT(posts.id) AS postCount
+      FROM users
+      LEFT JOIN posts ON posts.authorId = users.id
+      GROUP BY users.id
+      ORDER BY postCount DESC, users.username ASC
+      LIMIT 6
+    `)
+    .all();
+
+  res.json({ participants: rows });
+});
+
+// GET /api/posts/:id — single post with its comments
+router.get('/:id', optionalAuth, (req, res) => {
+  const post = db
+    .prepare(
+      `SELECT ${POST_FIELDS}
+       FROM posts
+       JOIN users ON users.id = posts.authorId
+       LEFT JOIN categories ON categories.id = posts.categoryId
+       WHERE posts.id = ?`
+    )
+    .get(req.params.id);
+  if (!post) return res.status(404).json({ error: 'That post no longer exists.' });
+
+  const [withLiked] = attachViewerLiked([post], req.user?.id);
+
+  const comments = db
+    .prepare(
+      `
+    SELECT comments.id, comments.text, comments.createdAt,
+           users.id AS authorId, users.username AS authorUsername
+    FROM comments
+    JOIN users ON users.id = comments.authorId
+    WHERE comments.postId = ?
+    ORDER BY comments.createdAt ASC
+  `
+    )
+    .all(req.params.id);
+
+  res.json({ post: withLiked, comments });
+});
+
+// POST /api/posts — create a post (auth required)
+router.post('/', requireAuth, upload.single('media'), (req, res) => {
+  const { title, content, categoryId } = req.body || {};
+  if (!title || !title.trim()) {
+    if (req.file) removeMediaFile(`/uploads/${req.file.filename}`);
+    return res.status(400).json({ error: 'A post needs a title.' });
+  }
+
+  const hasContent = typeof content === 'string' && content.trim().length > 0;
+  const hasMedia = Boolean(req.file);
+  if (!hasContent && !hasMedia) {
+    return res.status(400).json({ error: 'A post needs some text or a media attachment.' });
+  }
+
+  let validCategoryId = null;
+  if (categoryId) {
+    const cat = db.prepare('SELECT id FROM categories WHERE id = ?').get(categoryId);
+    if (!cat) {
+      if (req.file) removeMediaFile(`/uploads/${req.file.filename}`);
+      return res.status(400).json({ error: 'Selected category does not exist.' });
+    }
+    validCategoryId = categoryId;
+  }
+
+  const mediaUrl = req.file ? `/uploads/${req.file.filename}` : null;
+  const mediaType = req.file ? (req.file.mimetype.startsWith('image/') ? 'image' : 'video') : null;
+
+  const info = db
+    .prepare('INSERT INTO posts (authorId, categoryId, title, content, mediaType, mediaUrl) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(req.user.id, validCategoryId, title.trim(), (content || '').trim(), mediaType, mediaUrl);
+
+  const post = db
+    .prepare(
+      `SELECT ${POST_FIELDS}
+       FROM posts
+       JOIN users ON users.id = posts.authorId
+       LEFT JOIN categories ON categories.id = posts.categoryId
+       WHERE posts.id = ?`
+    )
+    .get(Number(info.lastInsertRowid));
+
+  res.status(201).json({ post: { ...post, likedByMe: false } });
+});
+
+// PUT /api/posts/:id — edit a post (author or admin)
+router.put('/:id', requireAuth, upload.single('media'), (req, res) => {
+  const { title, content, categoryId, removeMedia } = req.body || {};
+  if (!title || !title.trim()) {
+    if (req.file) removeMediaFile(`/uploads/${req.file.filename}`);
+    return res.status(400).json({ error: 'A post needs a title.' });
+  }
+
+  const existing = db.prepare('SELECT authorId, mediaUrl, mediaType FROM posts WHERE id = ?').get(req.params.id);
+  if (!existing) {
+    if (req.file) removeMediaFile(`/uploads/${req.file.filename}`);
+    return res.status(404).json({ error: 'That post no longer exists.' });
+  }
+  if (!isAuthorOrAdmin(existing.authorId, req.user)) {
+    if (req.file) removeMediaFile(`/uploads/${req.file.filename}`);
+    return res.status(403).json({ error: 'You can only edit your own posts.' });
+  }
+
+  const hasContent = typeof content === 'string' && content.trim().length > 0;
+  const hasMedia = Boolean(req.file) || (removeMedia === 'true' ? false : Boolean(existing.mediaUrl));
+  if (!hasContent && !hasMedia) {
+    if (req.file) removeMediaFile(`/uploads/${req.file.filename}`);
+    return res.status(400).json({ error: 'A post needs some text or a media attachment.' });
+  }
+
+  let validCategoryId = null;
+  if (categoryId) {
+    const cat = db.prepare('SELECT id FROM categories WHERE id = ?').get(categoryId);
+    if (!cat) {
+      if (req.file) removeMediaFile(`/uploads/${req.file.filename}`);
+      return res.status(400).json({ error: 'Selected category does not exist.' });
+    }
+    validCategoryId = categoryId;
+  }
+
+  let mediaUrl = existing.mediaUrl;
+  let mediaType = existing.mediaType;
+  if (req.file) {
+    if (existing.mediaUrl) removeMediaFile(existing.mediaUrl);
+    mediaUrl = `/uploads/${req.file.filename}`;
+    mediaType = req.file.mimetype.startsWith('image/') ? 'image' : 'video';
+  } else if (removeMedia === 'true' && existing.mediaUrl) {
+    removeMediaFile(existing.mediaUrl);
+    mediaUrl = null;
+    mediaType = null;
+  }
+
+  db.prepare('UPDATE posts SET categoryId = ?, title = ?, content = ?, mediaType = ?, mediaUrl = ? WHERE id = ?').run(
+    validCategoryId,
+    title.trim(),
+    (content || '').trim(),
+    mediaType,
+    mediaUrl,
+    req.params.id
+  );
+
+  const post = db
+    .prepare(
+      `SELECT ${POST_FIELDS}
+       FROM posts
+       JOIN users ON users.id = posts.authorId
+       LEFT JOIN categories ON categories.id = posts.categoryId
+       WHERE posts.id = ?`
+    )
+    .get(req.params.id);
+
+  const [withLiked] = attachViewerLiked([post], req.user.id);
+  res.json({ post: withLiked });
+});
+
+// DELETE /api/posts/:id — delete a post (author or admin)
+router.delete('/:id', requireAuth, (req, res) => {
+  const existing = db.prepare('SELECT authorId, mediaUrl FROM posts WHERE id = ?').get(req.params.id);
+  if (!existing) return res.status(404).json({ error: 'That post no longer exists.' });
+  if (!isAuthorOrAdmin(existing.authorId, req.user)) {
+    return res.status(403).json({ error: 'You can only delete your own posts.' });
+  }
+
+  db.prepare('DELETE FROM posts WHERE id = ?').run(req.params.id);
+  if (existing.mediaUrl) removeMediaFile(existing.mediaUrl);
+  res.status(204).end();
+});
+
+// POST /api/posts/:id/like — toggle a like (auth required)
+router.post('/:id/like', requireAuth, (req, res) => {
+  const post = db.prepare('SELECT id FROM posts WHERE id = ?').get(req.params.id);
+  if (!post) return res.status(404).json({ error: 'That post no longer exists.' });
+
+  const existing = db
+    .prepare('SELECT id FROM likes WHERE userId = ? AND postId = ?')
+    .get(req.user.id, req.params.id);
+
+  let liked;
+  if (existing) {
+    db.prepare('DELETE FROM likes WHERE id = ?').run(existing.id);
+    liked = false;
+  } else {
+    db.prepare('INSERT INTO likes (userId, postId) VALUES (?, ?)').run(req.user.id, req.params.id);
+    liked = true;
+  }
+
+  const likeCount = db.prepare('SELECT COUNT(*) AS n FROM likes WHERE postId = ?').get(req.params.id).n;
+  res.json({ liked, likeCount });
+});
+
+// POST /api/posts/:id/comments — add a comment (auth required)
+router.post('/:id/comments', requireAuth, (req, res) => {
+  const { text } = req.body || {};
+  if (!text || !text.trim()) return res.status(400).json({ error: 'Comment text can\u2019t be empty.' });
+
+  const post = db.prepare('SELECT id FROM posts WHERE id = ?').get(req.params.id);
+  if (!post) return res.status(404).json({ error: 'That post no longer exists.' });
+
+  const info = db
+    .prepare('INSERT INTO comments (postId, authorId, text) VALUES (?, ?, ?)')
+    .run(req.params.id, req.user.id, text.trim());
+
+  const comment = db
+    .prepare(
+      `
+    SELECT comments.id, comments.text, comments.createdAt,
+           users.id AS authorId, users.username AS authorUsername
+    FROM comments JOIN users ON users.id = comments.authorId
+    WHERE comments.id = ?
+  `
+    )
+    .get(Number(info.lastInsertRowid));
+
+  res.status(201).json({ comment });
+});
+
+// PUT /api/posts/:id/comments/:commentId — edit a comment (author or admin)
+router.put('/:id/comments/:commentId', requireAuth, (req, res) => {
+  const { text } = req.body || {};
+  if (!text || !text.trim()) return res.status(400).json({ error: 'Comment text can’t be empty.' });
+
+  const comment = db
+    .prepare('SELECT id, postId, authorId FROM comments WHERE id = ? AND postId = ?')
+    .get(req.params.commentId, req.params.id);
+  if (!comment) return res.status(404).json({ error: 'That comment no longer exists.' });
+  if (!isAuthorOrAdmin(comment.authorId, req.user)) {
+    return res.status(403).json({ error: 'You can only edit your own comments.' });
+  }
+
+  db.prepare('UPDATE comments SET text = ? WHERE id = ?').run(text.trim(), req.params.commentId);
+
+  const updatedComment = db
+    .prepare(
+      `SELECT comments.id, comments.text, comments.createdAt,
+              users.id AS authorId, users.username AS authorUsername
+       FROM comments
+       JOIN users ON users.id = comments.authorId
+       WHERE comments.id = ?`
+    )
+    .get(req.params.commentId);
+
+  res.json({ comment: updatedComment });
+});
+
+// DELETE /api/posts/:id/comments/:commentId — delete a comment (author or admin)
+router.delete('/:id/comments/:commentId', requireAuth, (req, res) => {
+  const comment = db
+    .prepare('SELECT id, postId, authorId FROM comments WHERE id = ? AND postId = ?')
+    .get(req.params.commentId, req.params.id);
+  if (!comment) return res.status(404).json({ error: 'That comment no longer exists.' });
+  if (!isAuthorOrAdmin(comment.authorId, req.user)) {
+    return res.status(403).json({ error: 'You can only delete your own comments.' });
+  }
+
+  db.prepare('DELETE FROM comments WHERE id = ?').run(req.params.commentId);
+  res.status(204).end();
+});
+
+module.exports = router;

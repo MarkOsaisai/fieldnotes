@@ -1,0 +1,24 @@
+{
+  "name": "fieldnotes",
+  "version": "1.0.0",
+  "description": "A full-stack community app: posts, comments, likes, a Popular feed filter, categories, and an admin-managed participant gallery.",
+  "main": "server/index.js",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^2.0.0"
+  },
+  "optionalDependencies": {
+    "pg": "^8.11.3"
+  },
+  "devDependencies": {}
+}

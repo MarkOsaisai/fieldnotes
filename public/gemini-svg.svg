@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="100%" height="100%">
+  <!-- Background (Optional, matches image aesthetic) -->
+  <rect width="100" height="100" fill="#F9F8F4" rx="20"/>
+
+  <!-- Notebook Base -->
+  <rect x="24" y="20" width="52" height="60" rx="4" fill="#FFFFFF" stroke="#223B2F" stroke-width="3" stroke-linejoin="round"/>
+
+  <!-- Spiral Binding -->
+  <line x1="20" y1="30" x2="28" y2="30" stroke="#223B2F" stroke-width="3" stroke-linecap="round"/>
+  <line x1="20" y1="42" x2="28" y2="42" stroke="#223B2F" stroke-width="3" stroke-linecap="round"/>
+  <line x1="20" y1="54" x2="28" y2="54" stroke="#223B2F" stroke-width="3" stroke-linecap="round"/>
+  <line x1="20" y1="66" x2="28" y2="66" stroke="#223B2F" stroke-width="3" stroke-linecap="round"/>
+
+  <!-- Sun -->
+  <circle cx="58" cy="36" r="6" fill="#D28D40"/>
+
+  <!-- Mountains -->
+  <path d="M 25 78 L 42 50 L 52 65 L 60 55 L 74 78 Z" fill="#223B2F"/>
+  
+  <!-- Mountain Snowcaps -->
+  <path d="M 42 50 L 47 58 L 42 62 L 37 58 Z" fill="#FFFFFF"/>
+  <path d="M 60 55 L 63 60 L 60 63 L 57 60 Z" fill="#FFFFFF"/>
+
+  <!-- Rolling Landscape -->
+  <path d="M 24 70 Q 40 65 50 75 T 75 70 L 75 80 L 24 80 Z" fill="#D28D40" stroke="#223B2F" stroke-width="3" stroke-linejoin="round"/>
+
+  <!-- Feather / Quill Pen -->
+  <path d="M 52 85 C 55 60 75 40 85 25 C 80 50 65 70 52 85 Z" fill="#4B6A56" stroke="#223B2F" stroke-width="3" stroke-linejoin="round"/>
+  <!-- Quill Stem -->
+  <line x1="52" y1="85" x2="85" y2="25" stroke="#223B2F" stroke-width="2"/>
+  
+  <!-- Pen Nib Detail -->
+  <path d="M 50 88 L 54 84 L 52 85 Z" fill="#D28D40"/>
+</svg>
